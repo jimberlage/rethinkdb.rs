@@ -25,10 +25,10 @@ pub type RethinkDBResult<T> = Result<T, RethinkDBError>;
 /// Represents a database connection. It is the actual struct that holds `TcpStream`
 /// to server;
 pub struct Connection {
-    pub host : String,
-    pub port : u16,
-    stream   : TcpStream,
-    auth     : String
+    pub host: String,
+    pub port: u16,
+    stream:   TcpStream,
+    auth:     String
 }
 
 impl Connection {
@@ -43,27 +43,47 @@ impl Connection {
             auth:   auth.to_string()
         };
 
-        conn.handshake();
+        try!(conn.handshake());
         Ok(conn)
     }
 
     /// Handshakes the connection. By now only supports `V0_4` and `JSON`.
-    fn handshake(&mut self)  {
+    fn handshake(&mut self) -> RethinkDBResult<()> {
+        // Send the magic number for V0_4.
         self.stream.write_u32::<LittleEndian>(VersionDummy_Version::V0_4 as u32);
+
+        // Send the authorization key, or nothing.
+        // TODO: Fix this to respect the connection's auth.
         self.stream.write_u32::<LittleEndian>(0);
+
+        // Send the magic number for the protocol.
         self.stream.write_u32::<LittleEndian>(VersionDummy_Protocol::JSON as u32);
+
         self.stream.flush();
 
-        let mut recv = Vec::new();
-        let null_s = b"\0"[0];
-        let mut buf = BufReader::new(&self.stream);
-        buf.read_until(null_s, &mut recv);
+        let mut recv = vec![];
 
-        match recv.pop() {
-            Some(null_s) => print!("{:?}", "OK, foi"),
-            _ => print!("{:?}", "Unable to connect")
+        // Read until NULL.
+        match BufReader::new(&self.stream).read_until(0, &mut recv) {
+            Ok(_) => {
+                let _ = recv.pop();
+                match String::from_utf8(recv) {
+                    Ok(s) => {
+                        if s.as_str() == "SUCCESS" {
+                            Ok(())
+                        } else {
+                            // TODO: Return something more descriptive - s contains the message
+                            // from RethinkDB.
+                            Err(RethinkDBError::ServerError)
+                        }
+                    },
+                    // TODO: Do something with the error besides swallowing it.
+                    Err(error) => Err(RethinkDBError::ServerError),
+                }
+            },
+            // TODO: Do something with the error besides swallowing it.
+            Err(error) => Err(RethinkDBError::ServerError),
         }
-
     }
 
     /// Talks to the server sending and reading back the propper JSON messages
