@@ -1,4 +1,3 @@
- #![feature(core)]
  #[warn(unused_imports)]
 extern crate byteorder;
 extern crate rustc_serialize;
