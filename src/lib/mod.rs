@@ -1,6 +1,6 @@
- #![feature(core)]
- #[warn(unused_imports)]
+#[warn(unused_imports)]
 extern crate byteorder;
+extern crate protobuf;
 extern crate rustc_serialize;
 
 pub mod api;

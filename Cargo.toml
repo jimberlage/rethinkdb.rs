@@ -1,17 +1,17 @@
 [package]
-name = "rust-rethinkdb"
+name = "rethinkdb.rs"
 version = "0.0.1"
 authors = ["abraaoisvi <abraao.isvi@gmail.com>", "paulo suzart <paulosuzart@gmail.com>"]
 license = "MIT"
-homepage = "http://sourust.rs/rust_docs/rethinkdb/index.html"
-repository = "https://github.com/avraamisvi/rethinkdbrust"
+repository = "https://github.com/jimberlage/rethinkdbrust"
 description = """
 Rust native driver for RethinkDB 2.0. WIP.
 """
 
 [dependencies]
-rustc-serialize = "*"
 byteorder = "*"
+protobuf = "*"
+rustc-serialize = "*"
 
 [lib]
 name = "rethinkdb"

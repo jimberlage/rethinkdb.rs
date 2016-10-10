@@ -1,15 +1,12 @@
-
-
 use std::thread;
 use std::sync::{Arc, Mutex};
 use rustc_serialize::json;
 use rustc_serialize::json::Json;
-use std::io::{BufStream, Error, Write, Read, BufRead};
+use std::io::{self, BufReader, Error, Write, Read, BufRead};
 use std::net::TcpStream;
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 use std::str;
 use ql2::*;
-
 
 #[derive(Debug)]
 pub enum RethinkDBError {
@@ -25,51 +22,67 @@ impl From<Error> for RethinkDBError {
 
 pub type RethinkDBResult<T> = Result<T, RethinkDBError>;
 
-
 /// Represents a database connection. It is the actual struct that holds `TcpStream`
 /// to server;
 pub struct Connection {
-    pub host : String,
-    pub port : u16,
-    stream   : TcpStream,
-    auth     : String
+    pub host: String,
+    pub port: u16,
+    stream:   TcpStream,
+    auth:     String
 }
 
 impl Connection {
-
-    /// Connects to the provided server `host` and `port`. `auth` is used for authentication.
-    pub fn connect(host: &str , port: u16, auth : &str) -> Connection {
-
-        let stream = TcpStream::connect((host, port)).ok().unwrap();
-
-        let mut conn = Connection{
-                host    : host.to_string(),
-                port    : port,
-                stream  : stream,
-                auth    : auth.to_string()
-        };
-
-        conn.handshake();
-        conn
-    }
-
     /// Handshakes the connection. By now only supports `V0_4` and `JSON`.
-    fn handshake(&mut self)  {
+    fn handshake(&mut self) -> RethinkDBResult<()> {
+        // Send the magic number for V0_4.
         self.stream.write_u32::<LittleEndian>(VersionDummy_Version::V0_4 as u32);
+
+        // Send the authorization key, or nothing.
+        // TODO: Fix this to respect the connection's auth.
         self.stream.write_u32::<LittleEndian>(0);
+
+        // Send the magic number for the protocol.
         self.stream.write_u32::<LittleEndian>(VersionDummy_Protocol::JSON as u32);
+
         self.stream.flush();
 
-        let mut recv = Vec::new();
-        let null_s = b"\0"[0];
-        let mut buf = BufStream::new(&self.stream);
-        buf.read_until(null_s, &mut recv);
+        let mut recv = vec![];
 
-        match recv.pop() {
-            Some(null_s) => print!("{:?}", "OK, foi"),
-            _ => print!("{:?}", "Unable to connect")
+        // Read until NULL.
+        match BufReader::new(&self.stream).read_until(0, &mut recv) {
+            Ok(_) => {
+                let _ = recv.pop();
+                match String::from_utf8(recv) {
+                    Ok(s) => {
+                        if s.as_str() == "SUCCESS" {
+                            Ok(())
+                        } else {
+                            // TODO: Return something more descriptive - s contains the message
+                            // from RethinkDB.
+                            Err(RethinkDBError::ServerError)
+                        }
+                    },
+                    // TODO: Do something with the error besides swallowing it.
+                    Err(error) => Err(RethinkDBError::ServerError),
+                }
+            },
+            // TODO: Do something with the error besides swallowing it.
+            Err(error) => Err(RethinkDBError::ServerError),
         }
+    }
 
+    /// Connects to the provided server `host` and `port`. `auth` is used for authentication.
+    pub fn connect(host: &str, port: u16, auth: &str) -> RethinkDBResult<Connection> {
+        let stream = try!(TcpStream::connect((host, port)));
+        let mut conn = Connection{
+            host:   host.to_string(),
+            port:   port,
+            stream: stream,
+            auth:   auth.to_string()
+        };
+
+        try!(conn.handshake());
+        Ok(conn)
     }
 
     /// Talks to the server sending and reading back the propper JSON messages
@@ -88,7 +101,7 @@ impl Connection {
         let recv_token = self.stream.read_i64::<LittleEndian>().ok().unwrap();
         let recv_len = self.stream.read_i32::<LittleEndian>().ok().unwrap();
 
-        let mut buf = BufStream::new(&self.stream);
+        let mut buf = BufReader::new(&self.stream);
         
         let mut c = Vec::with_capacity(recv_len as usize);
         buf.read(&mut c);
@@ -115,16 +128,15 @@ impl Connection {
 /// ```
 
 pub struct RethinkDB {
-    pool : Connection
+    pool: Connection
 }
 
 impl RethinkDB {
     /// Connects to RethinkDB with `pool_size` connections inside the pool.
-    pub fn connect(host: &str , port: u16, auth : &str, pool_size : usize) -> RethinkDB {
+    pub fn connect(host: &str, port: u16, auth: &str, pool_size: usize) -> RethinkDB {
         // let mut pool = Pool::with_capacity(pool_size, 0, ||  Connection::connect(host, port, auth));
-            
         RethinkDB {
-            pool : Connection::connect(host, port, auth)
+            pool: Connection::connect(host, port, auth).unwrap()
         }
     }
 
@@ -137,5 +149,4 @@ impl RethinkDB {
         // let mut conn = &mut pool.checkout().unwrap();
         self.pool.send(message.clone())
     }
-
 }
