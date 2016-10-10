@@ -32,21 +32,6 @@ pub struct Connection {
 }
 
 impl Connection {
-
-    /// Connects to the provided server `host` and `port`. `auth` is used for authentication.
-    pub fn connect(host: &str, port: u16, auth: &str) -> RethinkDBResult<Connection> {
-        let stream = try!(TcpStream::connect((host, port)));
-        let mut conn = Connection{
-            host:   host.to_string(),
-            port:   port,
-            stream: stream,
-            auth:   auth.to_string()
-        };
-
-        try!(conn.handshake());
-        Ok(conn)
-    }
-
     /// Handshakes the connection. By now only supports `V0_4` and `JSON`.
     fn handshake(&mut self) -> RethinkDBResult<()> {
         // Send the magic number for V0_4.
@@ -84,6 +69,20 @@ impl Connection {
             // TODO: Do something with the error besides swallowing it.
             Err(error) => Err(RethinkDBError::ServerError),
         }
+    }
+
+    /// Connects to the provided server `host` and `port`. `auth` is used for authentication.
+    pub fn connect(host: &str, port: u16, auth: &str) -> RethinkDBResult<Connection> {
+        let stream = try!(TcpStream::connect((host, port)));
+        let mut conn = Connection{
+            host:   host.to_string(),
+            port:   port,
+            stream: stream,
+            auth:   auth.to_string()
+        };
+
+        try!(conn.handshake());
+        Ok(conn)
     }
 
     /// Talks to the server sending and reading back the propper JSON messages
