@@ -1,5 +1,6 @@
 use std::thread;
 use std::sync::{Arc, Mutex};
+use std::u32;
 use rustc_serialize::json;
 use rustc_serialize::json::Json;
 use std::io::{self, BufReader, Error, Write, Read, BufRead};
@@ -11,7 +12,8 @@ use ql2::*;
 #[derive(Debug)]
 pub enum RethinkDBError {
     InternalIoError(Error),
-    ServerError
+    UserError(String),
+    ServerError(Option<String>),
 }
 
 impl From<Error> for RethinkDBError {
@@ -28,21 +30,35 @@ pub struct Connection {
     pub host: String,
     pub port: u16,
     stream:   TcpStream,
-    auth:     String
+    auth:     Option<String>,
+}
+
+pub enum HandshakeError {
 }
 
 impl Connection {
-    /// Handshakes the connection. By now only supports `V0_4` and `JSON`.
+    /// Handshakes the connection. By now only supports `V0_4` and `PROTOBUF`.
     fn handshake(&mut self) -> RethinkDBResult<()> {
         // Send the magic number for V0_4.
-        self.stream.write_u32::<LittleEndian>(VersionDummy_Version::V0_4 as u32);
+        try!(self.stream.write_u32::<LittleEndian>(VersionDummy_Version::V0_4 as u32));
 
         // Send the authorization key, or nothing.
-        // TODO: Fix this to respect the connection's auth.
-        self.stream.write_u32::<LittleEndian>(0);
+        match self.auth {
+            Some(ref key) => {
+                let key_bytes = key.as_bytes();
+                let n = key_bytes.len();
+                if n > (u32::MAX as usize) {
+                    return Err(RethinkDBError::UserError(format!("The authorization key must be less than {} bytes.", n)));
+                } else {
+                    try!(self.stream.write_u32::<LittleEndian>(n as u32));
+                    let _ = try!(self.stream.write(&key_bytes));
+                }
+            },
+            None => { try!(self.stream.write_u32::<LittleEndian>(0)); },
+        };
 
         // Send the magic number for the protocol.
-        self.stream.write_u32::<LittleEndian>(VersionDummy_Protocol::JSON as u32);
+        try!(self.stream.write_u32::<LittleEndian>(VersionDummy_Protocol::PROTOBUF as u32));
 
         self.stream.flush();
 
@@ -57,17 +73,14 @@ impl Connection {
                         if s.as_str() == "SUCCESS" {
                             Ok(())
                         } else {
-                            // TODO: Return something more descriptive - s contains the message
-                            // from RethinkDB.
-                            Err(RethinkDBError::ServerError)
+                            Err(RethinkDBError::ServerError(s))
                         }
                     },
-                    // TODO: Do something with the error besides swallowing it.
-                    Err(error) => Err(RethinkDBError::ServerError),
+                    Err(error) => Err(RethinkDBError::ServerError(format!("{}", error.utf8_error()))),
                 }
             },
             // TODO: Do something with the error besides swallowing it.
-            Err(error) => Err(RethinkDBError::ServerError),
+            Err(error) => Err(RethinkDBError::ServerError()),
         }
     }
 
@@ -78,7 +91,7 @@ impl Connection {
             host:   host.to_string(),
             port:   port,
             stream: stream,
-            auth:   auth.to_string()
+            auth:   Some(auth.to_string())
         };
 
         try!(conn.handshake());

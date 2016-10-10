@@ -5,6 +5,8 @@ extern crate rustc_serialize;
 
 pub mod api;
 mod client;
+mod connection;
+mod query;
 
 mod ql2;
 mod test;

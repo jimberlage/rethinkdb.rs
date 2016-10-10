@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::str;
 use client::RethinkDB;
 
-
 macro_rules! json_array {
     ( $( $e:expr ),* )  => {{
         let mut a = Vec::new();
