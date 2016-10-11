@@ -4,11 +4,9 @@
 use rustc_serialize::json;
 use rustc_serialize::json::Json;
 use std::string::String;
-use std::thread::sleep_ms;
 use std::collections::BTreeMap;
 use RethinkDB;
 use api::*;
-
 
 struct Person {
     name : String,
@@ -55,18 +53,4 @@ struct Person {
 
 #[test]
 fn test_get() {
-    let mut rethinkdb = RethinkDB::connect("localhost", 7888, "", 3);
-    let db = db("test");
-    let tc = db.table_create("person_get").primary_key("name".to_string()).run(&mut rethinkdb);
-    sleep_ms(5000);
-    let mut nachoData = BTreeMap::new();
-    nachoData.insert("name".to_string(), Json::String("Nacho".to_string()));
-    nachoData.insert("age".to_string(), Json::I64(6i64));
-
-    db.table("person_get").insert(nachoData).run(&mut rethinkdb);
-    db.table("person_get").get(Json::String("Nacho".to_string())).run(&mut rethinkdb);
-
-    
 }
-
-
