@@ -3,42 +3,41 @@ use protobuf::Message;
 use protobuf::core::parse_from_bytes;
 use protobuf::stream::CodedOutputStream;
 use ql2::*;
+use rustc_serialize::json::{self, Json};
+use scram::{ClientFinal, ClientFirst, ServerFinal, ServerFirst};
 use std::fmt::{self, Display, Formatter};
 use std::io::{BufReader, Write, Read, BufRead};
 use std::net::TcpStream;
 use std::u32;
 
+const SUB_PROTOCOL_VERSION: i64 = 0;
+
 /// Represents a database connection.
 pub struct Connection {
-    pub host: String,
-    pub port: u16,
-    stream:   TcpStream,
-    auth:     Option<String>,
-}
-
-pub enum UserError {
-    AuthorizationKeyTooLarge(usize),
+    pub host:     String,
+    pub port:     u16,
+    pub user:     String,
+    pub password: String,
+    stream:       TcpStream,
 }
 
 pub enum Error {
-    UserError(UserError),
+    ReqlAuthError,
     ServerError(String),
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            &Error::UserError(UserError::AuthorizationKeyTooLarge(n)) => {
-                write!(f, "Authorization key cannot exceed {} bytes - found {}", u32::MAX, n)
-            },
-            &Error::ServerError(ref s) => write!(f, "{}", s),
+            &Error::ReqlAuthError => write!(f, "Authentication failed."),
+            &Error::ServerError(ref error) => write!(f, "{}", error),
         }
     }
 }
 
 /// Like the original try macro, but it attempts to coerce the argument to our own Error type.
 /// This is indispensible given the number of calls to try! below.
-macro_rules! try {
+macro_rules! my_try {
     ($e:expr) => {{
         match $e {
             Ok(x) => x,
@@ -47,97 +46,180 @@ macro_rules! try {
     }}
 }
 
+/// The response returned by V1_0 of the RethinkDB handshake protocol, after a protocol version has
+/// been successfully set.
+#[derive(RustcDecodable)]
+struct ProtocolSuccessResponse {
+    success: bool,
+    min_protocol_version: i64,
+    max_protocol_version: i64,
+    server_version: String,
+}
+
+#[derive(RustcDecodable)]
+struct ServerSuccessResponse {
+    authentication: String,
+    success: bool,
+}
+
+#[derive(RustcDecodable)]
+struct ServerErrorResponse {
+    error: String,
+    error_code: i64,
+    success: bool,
+}
+
 impl Connection {
-    /// Writes a magic number (32-bit little-endian) to the RethinkDB server, as described in
-    /// [ql2.proto](https://github.com/rethinkdb/rethinkdb/blob/next/src/rdb_protocol/ql2.proto).
-    fn write_magic_number(&mut self, n: u32) -> Result<(), Error> {
-        try!(self.stream.write_u32::<LittleEndian>(n));
+    fn send_version_number(&self) -> Result<(), Error> {
+        my_try!(self.stream.write_u32::<LittleEndian>(VersionDummy_Version::V1_0 as u32));
+        my_try!(self.stream.flush());
 
         Ok(())
     }
 
-    /// Writes the authorization key (if any) to the RethinkDB server.  If none exists, it will
-    /// still write a length of 0 bytes.
-    fn write_authorization_key(&mut self) -> Result<(), Error> {
-        match self.auth.clone() {
-            Some(ref key) => {
-                let key_bytes = key.as_bytes();
-                let n = key_bytes.len();
-
-                if n > (u32::MAX as usize) {
-                    Err(Error::UserError(UserError::AuthorizationKeyTooLarge(n)))
-                } else {
-                    // Write the length of the key.
-                    try!(self.write_magic_number(n as u32));
-
-                    // Write the key itself.
-                    try!(self.stream.write(&key_bytes));
-
-                    Ok(())
-                }
-            },
-            // Write the length of the (nonexistent) key.
-            None => self.write_magic_number(0),
-        }
-    }
-
-    pub fn handshake(&mut self) -> Result<(), Error> {
-        // Send the magic number for V0_4.
-        try!(self.write_magic_number(VersionDummy_Version::V0_4 as u32));
-
-        try!(self.write_authorization_key());
-
-        // Send the magic number for the protocol.
-        try!(self.write_magic_number(VersionDummy_Protocol::JSON as u32));
-
-        try!(self.stream.flush());
-
+    /// Reads n bytes off the TCP stream, until a NULL byte is found.  The NULL byte is then
+    /// discarded, and the rest of the data is returned as a string.
+    fn read_until_null(&self) -> Result<String, Error> {
         let mut recv = vec![];
 
-        // Read until NULL.
         match BufReader::new(&self.stream).read_until(0, &mut recv) {
             Ok(_) => {
                 let _ = recv.pop();
-                match String::from_utf8(recv) {
-                    // RethinkDB indicates that the handshake was successful by sending a
-                    // NULL-terminated SUCCESS string.
-                    Ok(s) => if s.as_str() == "SUCCESS" {
-                        Ok(())
-                    } else {
-                        Err(Error::ServerError(s))
-                    },
-                    Err(error) => Err(Error::ServerError(format!("{}", error))),
-                }
+                let resp = my_try!(String::from_utf8(recv));
+
+                Ok(resp)
             },
             Err(error) => Err(Error::ServerError(format!("{}", error))),
         }
     }
 
+    fn parse_protocol_response(&self, resp: &str) -> Result<ProtocolSuccessResponse, Error> {
+        let resp = my_try!(self.read_until_null);
+
+        match json::decode::<ProtocolSuccessResponse>(resp.as_str()) {
+            Ok(obj) => if obj.success {
+                Ok(obj)
+            } else {
+                // Should never happen, but better to have the check than not.
+                Err(Error::ServerError("Received a success response from RethinkDB with success = false.".to_owned()))
+            },
+            Err(_) => Err(Error::ServerError(resp)),
+        }
+    }
+
+    /// Sends the first client handshake response with authentication.  Should send something like:
+    ///
+    /// ```json
+    /// {
+    ///   "authentication": "n,,n=user,r=rOprNGfwEbeRWgbNEkqO",
+    ///   "authentication_method": "SCRAM-SHA-256",
+    ///   "protocol_version": 0
+    /// }
+    /// ```
+    fn send_client_first_message(&self) -> Result<ServerFirst, Error> {
+        let client_first = ClientFirst::new(self.user, self.password);
+        let (server_first, auth) = client_first.client_first();
+        let message = BTreeMap::new();
+        message.insert("authentication".to_owned(), auth);
+        message.insert("authentication_method".to_owned(), "SCRAM-SHA-256".to_owned());
+        message.insert("protocol_version".to_owned(), Json::I64(SUB_PROTOCOL_VERSION));
+        let encoded = my_try!(json::encode(message));
+
+        my_try!(self.stream.write(&encoded.as_bytes()));
+        my_try!(self.stream.flush());
+
+        Ok(server_first)
+    }
+
+    /// Parses messages from the server, as defined for the RethinkDB handshake in
+    /// https://rethinkdb.com/docs/writing-drivers/
+    fn parse_server_message(&self) -> Result<ServerSuccessResponse, Error> {
+        let resp = my_try!(self.read_until_null());
+
+        match json::decode::<ServerSuccessResponse>(resp.as_str()) {
+            Ok(success_obj) => if success_obj.success {
+                Ok(success_obj)
+            } else {
+                // Should never happen, but better to have the check than not.
+                Err(Error::ServerError("Received a success response from RethinkDB with success = false.".to_owned()))
+            },
+            Err(_) => match json::decode::<ServerErrorResponse>(resp.as_str()) {
+                Ok(error_obj) => if !error_obj.success {
+                    // An error code within [10, 20] is defined to return a ReqlAuthError.
+                    if error_obj.error_code >= 10 && error_obj.error_code <= 20 {
+                        Err(Error::ReqlAuthError)
+                    } else {
+                        Err(Error::ServerError(error_obj.error))
+                    }
+                } else {
+                    // Should never happen, but better to have the check than not.
+                    Err(Error::ServerError("Received an error response from RethinkDB with success = true.".to_owned()))
+                },
+                // We don't have either a success or an error response.  Very weird.
+                Err(error) => Err(Error::ServerError(format!("{}", error))),
+            }
+        }
+    }
+
+    /// Sends the final client message in the authentication handshake.  Should look like:
+    ///
+    /// ```json
+    /// {
+    ///   "authentication": "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+    /// }
+    /// ```
+    fn send_client_final_message(&self, client_final: ClientFinal) -> Result<ServerFinal, Error> {
+        let (server_final, auth) = client_final.client_final();
+        let message = BTreeMap::new();
+        message.insert("authentication".to_owned(), auth);
+        let encoded = my_try!(json::encode(message));
+
+        my_try!(self.stream.write(&encoded.as_bytes()));
+        my_try!(self.stream.flush());
+
+        Ok(server_final)
+    }
+
+    /// Uses the handshake for V1_0, defined in https://rethinkdb.com/docs/writing-drivers/.
+    pub fn handshake(&mut self) -> Result<(), Error> {
+        my_try!(self.send_version_number());
+        let _ = my_try!(self.parse_protocol_response());
+        let server_first = my_try!(self.send_client_first_message());
+        let client_first_success = my_try!(self.parse_server_message());
+        let client_final = my_try!(server_first.handle_server_first(client_first_success.authentication));
+        let server_final = my_try!(self.send_client_final_message(client_final));
+        let client_final_success = my_try!(self.parse_server_message());
+        my_try!(server_final.handle_server_final(client_final_success.authentication));
+
+        Ok(())
+    }
+
     /// Connects to the provided server `host` and `port`. `auth` is used for authentication.
-    pub fn connect(host: &str, port: u16, auth: Option<&str>) -> Result<Connection, Error> {
-        let stream = try!(TcpStream::connect((host, port)));
+    pub fn connect(host: &str, port: u16, user: &str, password: &str) -> Result<Connection, Error> {
+        let stream = my_try!(TcpStream::connect((host, port)));
         let mut conn = Connection{
-            host:   host.to_string(),
-            port:   port,
-            stream: stream,
-            auth:   auth.map(|s| s.to_owned()),
+            host:     host.to_string(),
+            port:     port,
+            stream:   stream,
+            user:     user.to_owned(),
+            password: password.to_owned(),
         };
 
-        try!(conn.handshake());
+        my_try!(conn.handshake());
 
         Ok(conn)
     }
 
     fn write_query(&mut self, query: &Query) -> Result<(), Error> {
         // Write the size of the incoming protobuf.
-        try!(self.write_magic_number(query.compute_size()));
+        my_try!(self.write_magic_number(query.compute_size()));
 
         // Write the actual protobuf.
         let mut writer = CodedOutputStream::new(&mut self.stream);
 
-        try!(writer.write_message_no_tag::<Query>(query));
+        my_try!(writer.write_message_no_tag::<Query>(query));
 
-        try!(writer.flush());
+        my_try!(writer.flush());
 
         Ok(())
     }
@@ -147,23 +229,23 @@ impl Connection {
         let mut buffered_reader = BufReader::new(&self.stream);
 
         // Read the size of the new protobuf.
-        let len = try!(buffered_reader.read_u32::<LittleEndian>());
+        let len = my_try!(buffered_reader.read_u32::<LittleEndian>());
 
         // Now, take only that many bytes off the stream.
         let mut recv = vec![];
 
-        try!(buffered_reader.take(len as u64).read(&mut recv));
+        my_try!(buffered_reader.take(len as u64).read(&mut recv));
 
         // And, attempt to read the response protobuf.
-        let resp = try!(parse_from_bytes::<Response>(&recv));
+        let resp = my_try!(parse_from_bytes::<Response>(&recv));
 
         // Return the response.
         Ok(resp)
     }
 
     pub fn query(&mut self, query: &Query) -> Result<Response, Error> {
-        try!(self.write_query(query));
-        let resp = try!(self.read_query_response());
+        my_try!(self.write_query(query));
+        let resp = my_try!(self.read_query_response());
 
         Ok(resp)
     }
