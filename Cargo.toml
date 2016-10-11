@@ -1,9 +1,9 @@
 [package]
 name = "rethinkdb.rs"
 version = "0.0.1"
-authors = ["abraaoisvi <abraao.isvi@gmail.com>", "paulo suzart <paulosuzart@gmail.com>"]
+authors = ["Jim Berlage <james.berlage@gmail.com>", "abraaoisvi <abraao.isvi@gmail.com>", "paulo suzart <paulosuzart@gmail.com>"]
 license = "MIT"
-repository = "https://github.com/jimberlage/rethinkdbrust"
+repository = "https://github.com/jimberlage/rethinkdb.rs"
 description = """
 Rust native driver for RethinkDB 2.0. WIP.
 """
@@ -12,6 +12,7 @@ Rust native driver for RethinkDB 2.0. WIP.
 byteorder = "*"
 protobuf = "*"
 rustc-serialize = "*"
+scram = "*"
 
 [lib]
 name = "rethinkdb"
