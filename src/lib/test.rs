@@ -1,16 +1,19 @@
 #[cfg(test)]
 #[warn(unused_imports)]
 
-use rustc_serialize::json;
-use rustc_serialize::json::Json;
-use std::string::String;
-use std::collections::BTreeMap;
-use RethinkDB;
-use api::*;
+use connection::Connection;
 
-struct Person {
-    name : String,
-    age  : i32
+#[test]
+fn test_connect() {
+    // Must have RethinkDB running and listening for client driver connections on port 28015.
+    // TODO: Make this configurable.
+    match Connection::connect("localhost", 28015, None) {
+        Ok(_) => assert!(true),
+        Err(error) => {
+            println!("{}", error);
+            assert!(false);
+        },
+    };
 }
 
 // // socat  -v -x TCP4-LISTEN:7888,fork,reuseaddr TCP4:localhost:28015
@@ -50,7 +53,3 @@ struct Person {
 
 //     assert_eq!(1,2);
 // }
-
-#[test]
-fn test_get() {
-}

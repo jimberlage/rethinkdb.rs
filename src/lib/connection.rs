@@ -56,6 +56,8 @@ impl Connection {
         Ok(())
     }
 
+    /// Writes the authorization key (if any) to the RethinkDB server.  If none exists, it will
+    /// still write a length of 0 bytes.
     fn write_authorization_key(&mut self) -> Result<(), Error> {
         match self.auth.clone() {
             Some(ref key) => {
@@ -65,13 +67,16 @@ impl Connection {
                 if n > (u32::MAX as usize) {
                     Err(Error::UserError(UserError::AuthorizationKeyTooLarge(n)))
                 } else {
+                    // Write the length of the key.
                     try!(self.write_magic_number(n as u32));
 
+                    // Write the key itself.
                     try!(self.stream.write(&key_bytes));
 
                     Ok(())
                 }
             },
+            // Write the length of the (nonexistent) key.
             None => self.write_magic_number(0),
         }
     }
@@ -80,11 +85,10 @@ impl Connection {
         // Send the magic number for V0_4.
         try!(self.write_magic_number(VersionDummy_Version::V0_4 as u32));
 
-        // Send the authorization key, or nothing.
         try!(self.write_authorization_key());
 
         // Send the magic number for the protocol.
-        try!(self.write_magic_number(VersionDummy_Protocol::PROTOBUF as u32));
+        try!(self.write_magic_number(VersionDummy_Protocol::JSON as u32));
 
         try!(self.stream.flush());
 
@@ -95,6 +99,8 @@ impl Connection {
             Ok(_) => {
                 let _ = recv.pop();
                 match String::from_utf8(recv) {
+                    // RethinkDB indicates that the handshake was successful by sending a
+                    // NULL-terminated SUCCESS string.
                     Ok(s) => if s.as_str() == "SUCCESS" {
                         Ok(())
                     } else {
@@ -108,13 +114,13 @@ impl Connection {
     }
 
     /// Connects to the provided server `host` and `port`. `auth` is used for authentication.
-    pub fn connect(host: &str, port: u16, auth: &str) -> Result<Connection, Error> {
+    pub fn connect(host: &str, port: u16, auth: Option<&str>) -> Result<Connection, Error> {
         let stream = try!(TcpStream::connect((host, port)));
         let mut conn = Connection{
             host:   host.to_string(),
             port:   port,
             stream: stream,
-            auth:   Some(auth.to_string())
+            auth:   auth.map(|s| s.to_owned()),
         };
 
         try!(conn.handshake());
