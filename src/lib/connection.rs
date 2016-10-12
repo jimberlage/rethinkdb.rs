@@ -5,6 +5,9 @@ use protobuf::stream::CodedOutputStream;
 use ql2::*;
 use rustc_serialize::json::{self, Json};
 use scram::{ClientFinal, ClientFirst, ServerFinal, ServerFirst};
+// NOTE: Think of this like an Atom in Clojure.  It allows local mutability.
+use std::cell::{Ref, RefCell, RefMut};
+use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::io::{BufReader, Write, Read, BufRead};
 use std::net::TcpStream;
@@ -18,7 +21,7 @@ pub struct Connection {
     pub port:     u16,
     pub user:     String,
     pub password: String,
-    stream:       TcpStream,
+    stream:       RefCell<TcpStream>,
 }
 
 pub enum Error {
@@ -71,18 +74,16 @@ struct ServerErrorResponse {
 
 impl Connection {
     fn send_version_number(&self) -> Result<(), Error> {
-        my_try!(self.stream.write_u32::<LittleEndian>(VersionDummy_Version::V1_0 as u32));
-        my_try!(self.stream.flush());
+        my_try!(self.stream.borrow_mut().write_u32::<LittleEndian>(VersionDummy_Version::V1_0 as u32));
+        my_try!(self.stream.borrow_mut().flush());
 
         Ok(())
     }
 
-    /// Reads n bytes off the TCP stream, until a NULL byte is found.  The NULL byte is then
-    /// discarded, and the rest of the data is returned as a string.
-    fn read_until_null(&self) -> Result<String, Error> {
+    fn read_stream_until_null(stream: &TcpStream) -> Result<String, Error> {
         let mut recv = vec![];
 
-        match BufReader::new(&self.stream).read_until(0, &mut recv) {
+        match BufReader::new(stream).read_until(0, &mut recv) {
             Ok(_) => {
                 let _ = recv.pop();
                 let resp = my_try!(String::from_utf8(recv));
@@ -93,8 +94,22 @@ impl Connection {
         }
     }
 
-    fn parse_protocol_response(&self, resp: &str) -> Result<ProtocolSuccessResponse, Error> {
-        let resp = my_try!(self.read_until_null);
+    /// Reads n bytes off the TCP stream, until a NULL byte is found.  The NULL byte is then
+    /// discarded, and the rest of the data is returned as a string.
+    fn read_until_null(&self) -> Result<String, Error> {
+        let mut result = None;
+
+        Ref::map(self.stream.borrow(), |stream| {
+            result = Some(Connection::read_stream_until_null(stream));
+
+            stream
+        });
+
+        result.unwrap()
+    }
+
+    fn parse_protocol_response(&self) -> Result<ProtocolSuccessResponse, Error> {
+        let resp = my_try!(self.read_until_null());
 
         match json::decode::<ProtocolSuccessResponse>(resp.as_str()) {
             Ok(obj) => if obj.success {
@@ -117,16 +132,16 @@ impl Connection {
     /// }
     /// ```
     fn send_client_first_message(&self) -> Result<ServerFirst, Error> {
-        let client_first = ClientFirst::new(self.user, self.password);
+        let client_first = my_try!(ClientFirst::new(&self.user, &self.password, None));
         let (server_first, auth) = client_first.client_first();
-        let message = BTreeMap::new();
-        message.insert("authentication".to_owned(), auth);
-        message.insert("authentication_method".to_owned(), "SCRAM-SHA-256".to_owned());
+        let mut message = BTreeMap::new();
+        message.insert("authentication".to_owned(), Json::String(auth));
+        let method = "SCRAM-SHA-256".to_owned();
+        message.insert("authentication_method".to_owned(), Json::String(method));
         message.insert("protocol_version".to_owned(), Json::I64(SUB_PROTOCOL_VERSION));
-        let encoded = my_try!(json::encode(message));
-
-        my_try!(self.stream.write(&encoded.as_bytes()));
-        my_try!(self.stream.flush());
+        let encoded = my_try!(json::encode(&message));
+        my_try!(self.stream.borrow_mut().write(&encoded.as_bytes()));
+        my_try!(self.stream.borrow_mut().flush());
 
         Ok(server_first)
     }
@@ -170,26 +185,26 @@ impl Connection {
     /// ```
     fn send_client_final_message(&self, client_final: ClientFinal) -> Result<ServerFinal, Error> {
         let (server_final, auth) = client_final.client_final();
-        let message = BTreeMap::new();
+        let mut message = BTreeMap::new();
         message.insert("authentication".to_owned(), auth);
-        let encoded = my_try!(json::encode(message));
+        let encoded = my_try!(json::encode(&message));
 
-        my_try!(self.stream.write(&encoded.as_bytes()));
-        my_try!(self.stream.flush());
+        my_try!(self.stream.borrow_mut().write(&encoded.as_bytes()));
+        my_try!(self.stream.borrow_mut().flush());
 
         Ok(server_final)
     }
 
     /// Uses the handshake for V1_0, defined in https://rethinkdb.com/docs/writing-drivers/.
-    pub fn handshake(&mut self) -> Result<(), Error> {
+    pub fn handshake(&self) -> Result<(), Error> {
         my_try!(self.send_version_number());
         let _ = my_try!(self.parse_protocol_response());
         let server_first = my_try!(self.send_client_first_message());
         let client_first_success = my_try!(self.parse_server_message());
-        let client_final = my_try!(server_first.handle_server_first(client_first_success.authentication));
+        let client_final = my_try!(server_first.handle_server_first(&client_first_success.authentication));
         let server_final = my_try!(self.send_client_final_message(client_final));
         let client_final_success = my_try!(self.parse_server_message());
-        my_try!(server_final.handle_server_final(client_final_success.authentication));
+        my_try!(server_final.handle_server_final(&client_final_success.authentication));
 
         Ok(())
     }
@@ -200,7 +215,7 @@ impl Connection {
         let mut conn = Connection{
             host:     host.to_string(),
             port:     port,
-            stream:   stream,
+            stream:   RefCell::new(stream),
             user:     user.to_owned(),
             password: password.to_owned(),
         };
@@ -208,45 +223,5 @@ impl Connection {
         my_try!(conn.handshake());
 
         Ok(conn)
-    }
-
-    fn write_query(&mut self, query: &Query) -> Result<(), Error> {
-        // Write the size of the incoming protobuf.
-        my_try!(self.write_magic_number(query.compute_size()));
-
-        // Write the actual protobuf.
-        let mut writer = CodedOutputStream::new(&mut self.stream);
-
-        my_try!(writer.write_message_no_tag::<Query>(query));
-
-        my_try!(writer.flush());
-
-        Ok(())
-    }
-
-    fn read_query_response(&self) -> Result<Response, Error> {
-        // Create a buffered reader to avoid making lots of TCP calls.
-        let mut buffered_reader = BufReader::new(&self.stream);
-
-        // Read the size of the new protobuf.
-        let len = my_try!(buffered_reader.read_u32::<LittleEndian>());
-
-        // Now, take only that many bytes off the stream.
-        let mut recv = vec![];
-
-        my_try!(buffered_reader.take(len as u64).read(&mut recv));
-
-        // And, attempt to read the response protobuf.
-        let resp = my_try!(parse_from_bytes::<Response>(&recv));
-
-        // Return the response.
-        Ok(resp)
-    }
-
-    pub fn query(&mut self, query: &Query) -> Result<Response, Error> {
-        my_try!(self.write_query(query));
-        let resp = my_try!(self.read_query_response());
-
-        Ok(resp)
     }
 }

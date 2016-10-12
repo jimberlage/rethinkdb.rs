@@ -2,6 +2,7 @@
 extern crate byteorder;
 extern crate protobuf;
 extern crate rustc_serialize;
+extern crate scram;
 
 pub mod api;
 mod client;
