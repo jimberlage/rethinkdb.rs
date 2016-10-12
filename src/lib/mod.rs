@@ -4,12 +4,19 @@ extern crate protobuf;
 extern crate rustc_serialize;
 extern crate scram;
 
-pub mod api;
-mod client;
-mod connection;
-mod query;
+#[macro_use]
+mod macros;
 
+mod connection;
+mod db;
+mod error;
+mod query;
 mod ql2;
 mod test;
-// pub use api::*;
-pub use client::*;
+
+use db::DB;
+use error::Error;
+
+pub fn db() -> Result<DB, Error> {
+    Ok(DB{})
+}

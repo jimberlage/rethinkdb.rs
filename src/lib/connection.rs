@@ -1,11 +1,11 @@
 use byteorder::{WriteBytesExt, LittleEndian};
-use ql2::*;
+use error::Error;
+use ql2::VersionDummy_Version;
 use rustc_serialize::json::{self, Json};
 use scram::{ClientFinal, ClientFirst, ServerFinal, ServerFirst};
 // NOTE: Think of this like an Atom in Clojure.  It allows local mutability.
 use std::cell::{Ref, RefCell};
 use std::collections::BTreeMap;
-use std::fmt::{self, Display, Formatter};
 use std::io::{BufReader, Write, BufRead};
 use std::net::{Shutdown, TcpStream};
 use std::u32;
@@ -19,31 +19,6 @@ pub struct Connection {
     pub user:     String,
     pub password: String,
     stream:       RefCell<TcpStream>,
-}
-
-pub enum Error {
-    ReqlAuthError,
-    ServerError(String),
-}
-
-impl Display for Error {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            &Error::ReqlAuthError => write!(f, "Authentication failed."),
-            &Error::ServerError(ref error) => write!(f, "{}", error),
-        }
-    }
-}
-
-/// Like the original try macro, but it attempts to coerce the argument to our own Error type.
-/// This is indispensible given the number of calls to try! below.
-macro_rules! my_try {
-    ($e:expr) => {{
-        match $e {
-            Ok(x) => x,
-            Err(error) => return Err($crate::connection::Error::ServerError(format!("{}", error))),
-        }
-    }}
 }
 
 /// The response returned by V1_0 of the RethinkDB handshake protocol, after a protocol version has
