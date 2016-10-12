@@ -1,4 +1,4 @@
-use ql2::{Query, Query_QueryType, Term};
+use ql2::{Query, Query_QueryType};
 use protobuf::ProtobufEnum;
 use rustc_serialize::json::{Json, ToJson};
 use std::collections::BTreeMap;
