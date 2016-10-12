@@ -7,7 +7,7 @@ use connection::Connection;
 fn test_connect() {
     // Must have RethinkDB running and listening for client driver connections on port 28015.
     // TODO: Make this configurable.
-    match Connection::connect("localhost", 28015, None) {
+    match Connection::connect("localhost", 28015, "admin", "") {
         Ok(_) => assert!(true),
         Err(error) => {
             println!("{}", error);

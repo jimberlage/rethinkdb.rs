@@ -1,16 +1,13 @@
-use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
-use protobuf::Message;
-use protobuf::core::parse_from_bytes;
-use protobuf::stream::CodedOutputStream;
+use byteorder::{WriteBytesExt, LittleEndian};
 use ql2::*;
 use rustc_serialize::json::{self, Json};
 use scram::{ClientFinal, ClientFirst, ServerFinal, ServerFirst};
 // NOTE: Think of this like an Atom in Clojure.  It allows local mutability.
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Ref, RefCell};
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
-use std::io::{BufReader, Write, Read, BufRead};
-use std::net::TcpStream;
+use std::io::{BufReader, Write, BufRead};
+use std::net::{Shutdown, TcpStream};
 use std::u32;
 
 const SUB_PROTOCOL_VERSION: i64 = 0;
@@ -51,7 +48,7 @@ macro_rules! my_try {
 
 /// The response returned by V1_0 of the RethinkDB handshake protocol, after a protocol version has
 /// been successfully set.
-#[derive(RustcDecodable)]
+#[derive(Debug,RustcDecodable)]
 struct ProtocolSuccessResponse {
     success: bool,
     min_protocol_version: i64,
@@ -59,7 +56,7 @@ struct ProtocolSuccessResponse {
     server_version: String,
 }
 
-#[derive(RustcDecodable)]
+#[derive(Debug,RustcDecodable)]
 struct ServerSuccessResponse {
     authentication: String,
     success: bool,
@@ -141,6 +138,7 @@ impl Connection {
         message.insert("protocol_version".to_owned(), Json::I64(SUB_PROTOCOL_VERSION));
         let encoded = my_try!(json::encode(&message));
         my_try!(self.stream.borrow_mut().write(&encoded.as_bytes()));
+        my_try!(self.stream.borrow_mut().write_u8(0));
         my_try!(self.stream.borrow_mut().flush());
 
         Ok(server_first)
@@ -190,29 +188,30 @@ impl Connection {
         let encoded = my_try!(json::encode(&message));
 
         my_try!(self.stream.borrow_mut().write(&encoded.as_bytes()));
+        my_try!(self.stream.borrow_mut().write_u8(0));
         my_try!(self.stream.borrow_mut().flush());
 
         Ok(server_final)
     }
 
     /// Uses the handshake for V1_0, defined in https://rethinkdb.com/docs/writing-drivers/.
-    pub fn handshake(&self) -> Result<(), Error> {
+    fn handshake(&self) -> Result<(), Error> {
         my_try!(self.send_version_number());
         let _ = my_try!(self.parse_protocol_response());
         let server_first = my_try!(self.send_client_first_message());
-        let client_first_success = my_try!(self.parse_server_message());
-        let client_final = my_try!(server_first.handle_server_first(&client_first_success.authentication));
+        let client_first_response = my_try!(self.parse_server_message());
+        let client_final = my_try!(server_first.handle_server_first(&client_first_response.authentication));
         let server_final = my_try!(self.send_client_final_message(client_final));
-        let client_final_success = my_try!(self.parse_server_message());
-        my_try!(server_final.handle_server_final(&client_final_success.authentication));
+        let client_final_response = my_try!(self.parse_server_message());
+        my_try!(server_final.handle_server_final(&client_final_response.authentication));
 
         Ok(())
     }
 
-    /// Connects to the provided server `host` and `port`. `auth` is used for authentication.
+    /// Connects to the provided server `host` and `port`.
     pub fn connect(host: &str, port: u16, user: &str, password: &str) -> Result<Connection, Error> {
         let stream = my_try!(TcpStream::connect((host, port)));
-        let mut conn = Connection{
+        let conn = Connection{
             host:     host.to_string(),
             port:     port,
             stream:   RefCell::new(stream),
@@ -220,8 +219,17 @@ impl Connection {
             password: password.to_owned(),
         };
 
-        my_try!(conn.handshake());
+        match conn.handshake() {
+            Ok(()) => Ok(conn),
+            Err(error) => {
+                Ref::map(conn.stream.borrow(), |stream| {
+                    stream.shutdown(Shutdown::Both).unwrap();
 
-        Ok(conn)
+                    stream
+                });
+
+                Err(error)
+            },
+        }
     }
 }
