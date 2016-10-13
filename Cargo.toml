@@ -16,5 +16,4 @@ scram = "*"
 
 [lib]
 name = "rethinkdb"
-path = "src/lib/mod.rs"
-
+path = "src/lib.rs"
