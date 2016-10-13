@@ -1,13 +1,15 @@
-use byteorder::{WriteBytesExt, LittleEndian};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use error::Error;
-use ql2::VersionDummy_Version;
-use rustc_serialize::json::{self, Json};
+use ql2::{Term_TermType, VersionDummy_Version};
+use reql::tree::Tree;
+use rustc_serialize::json::{self, Json, ToJson};
 use scram::{ClientFinal, ClientFirst, ServerFinal, ServerFirst};
 // NOTE: Think of this like an Atom in Clojure.  It allows local mutability.
-use std::cell::{Ref, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::BTreeMap;
-use std::io::{BufReader, Write, BufRead};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::str;
 use std::u32;
 
 const SUB_PROTOCOL_VERSION: i64 = 0;
@@ -19,29 +21,36 @@ pub struct Connection {
     pub user:     String,
     pub password: String,
     stream:       RefCell<TcpStream>,
+    query_token:  Cell<u64>,
+}
+
+pub struct QueryResponse {
+    query_token: u64,
+    length:      u32,
+    response:    Json,
 }
 
 /// The response returned by V1_0 of the RethinkDB handshake protocol, after a protocol version has
 /// been successfully set.
 #[derive(Debug,RustcDecodable)]
 struct ProtocolSuccessResponse {
-    success: bool,
+    success:              bool,
     min_protocol_version: i64,
     max_protocol_version: i64,
-    server_version: String,
+    server_version:       String,
 }
 
 #[derive(Debug,RustcDecodable)]
 struct ServerSuccessResponse {
     authentication: String,
-    success: bool,
+    success:        bool,
 }
 
 #[derive(RustcDecodable)]
 struct ServerErrorResponse {
-    error: String,
+    error:      String,
     error_code: i64,
-    success: bool,
+    success:    bool,
 }
 
 impl Connection {
@@ -187,11 +196,12 @@ impl Connection {
     pub fn connect(host: &str, port: u16, user: &str, password: &str) -> Result<Connection, Error> {
         let stream = my_try!(TcpStream::connect((host, port)));
         let conn = Connection{
-            host:     host.to_string(),
-            port:     port,
-            stream:   RefCell::new(stream),
-            user:     user.to_owned(),
-            password: password.to_owned(),
+            host:        host.to_string(),
+            port:        port,
+            stream:      RefCell::new(stream),
+            query_token: Cell::new(0),
+            user:        user.to_owned(),
+            password:    password.to_owned(),
         };
 
         match conn.handshake() {
@@ -206,5 +216,60 @@ impl Connection {
                 Err(error)
             },
         }
+    }
+
+    fn send_query(&self, tree: &Tree) -> Result<(), Error> {
+        let token = self.query_token.get();
+        // Increment the token for the next request.
+        self.query_token.set(token.wrapping_add(1));
+        let tree = my_try!(json::encode(&tree.to_json()));
+        let len = tree.as_bytes().len();
+        if len > (u32::MAX as usize) {
+            return Err(Error::QueryTooLarge(len));
+        }
+
+        my_try!(self.stream.borrow_mut().write_u64::<LittleEndian>(token));
+        my_try!(self.stream.borrow_mut().write_u32::<LittleEndian>(len as u32));
+        my_try!(self.stream.borrow_mut().write(&tree.as_bytes()));
+
+        Ok(())
+    }
+
+    // TODO: Worry about how to handle unordered responses.  We should probably loop over the
+    // stream once the handshake is done, trying to read each response and putting it in a hashed
+    // collection.
+    fn parse_response_from_stream(stream: &TcpStream) -> Result<QueryResponse, Error> {
+        let mut reader = BufReader::new(stream);
+        let token = my_try!(reader.read_u64::<LittleEndian>());
+        let len = my_try!(reader.read_u32::<LittleEndian>());
+        let mut recv = vec![];
+        let _ = my_try!(reader.take(len as u64).read(&mut recv));
+        let response = my_try!(Json::from_str(my_try!(str::from_utf8(&recv))));
+
+        Ok(QueryResponse {
+            query_token: token,
+            length:      len,
+            response:    response,
+        })
+    }
+
+    fn parse_response(&self) -> Result<QueryResponse, Error> {
+        let mut result = None;
+
+        Ref::map(self.stream.borrow(), |stream| {
+            result = Some(Connection::parse_response_from_stream(stream));
+
+            stream
+        });
+
+        result.unwrap()
+    }
+
+    pub fn db_create(&self, name: &str) -> Result<QueryResponse, Error> {
+        my_try!(self.send_query(&Tree::Query {
+            head: Term_TermType::DB_CREATE,
+            tail: vec![Tree::Datum(Json::String(name.to_owned()))],
+        }));
+        Ok(my_try!(self.parse_response()))
     }
 }
