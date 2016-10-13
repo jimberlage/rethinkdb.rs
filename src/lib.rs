@@ -17,6 +17,6 @@ mod test;
 use db::DB;
 use error::Error;
 
-pub fn db() -> Result<DB, Error> {
+pub fn db(name: &str) -> Result<DB, Error> {
     Ok(DB{})
 }
