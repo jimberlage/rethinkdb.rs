@@ -16,41 +16,41 @@ const SUB_PROTOCOL_VERSION: i64 = 0;
 
 /// Represents a database connection.
 pub struct Connection {
-    pub host:     String,
-    pub port:     u16,
-    pub user:     String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
     pub password: String,
-    stream:       RefCell<TcpStream>,
-    query_token:  Cell<u64>,
+    stream: RefCell<TcpStream>,
+    query_token: Cell<u64>,
 }
 
 pub struct QueryResponse {
     query_token: u64,
-    length:      u32,
-    response:    Json,
+    length: u32,
+    response: Json,
 }
 
 /// The response returned by V1_0 of the RethinkDB handshake protocol, after a protocol version has
 /// been successfully set.
 #[derive(Debug,RustcDecodable)]
 struct ProtocolSuccessResponse {
-    success:              bool,
+    success: bool,
     min_protocol_version: i64,
     max_protocol_version: i64,
-    server_version:       String,
+    server_version: String,
 }
 
 #[derive(Debug,RustcDecodable)]
 struct ServerSuccessResponse {
     authentication: String,
-    success:        bool,
+    success: bool,
 }
 
 #[derive(RustcDecodable)]
 struct ServerErrorResponse {
-    error:      String,
+    error: String,
     error_code: i64,
-    success:    bool,
+    success: bool,
 }
 
 impl Connection {
@@ -196,12 +196,12 @@ impl Connection {
     pub fn connect(host: &str, port: u16, user: &str, password: &str) -> Result<Connection, Error> {
         let stream = my_try!(TcpStream::connect((host, port)));
         let conn = Connection{
-            host:        host.to_string(),
-            port:        port,
-            stream:      RefCell::new(stream),
+            host: host.to_owned(),
+            port: port,
+            stream: RefCell::new(stream),
             query_token: Cell::new(0),
-            user:        user.to_owned(),
-            password:    password.to_owned(),
+            user: user.to_owned(),
+            password: password.to_owned(),
         };
 
         match conn.handshake() {
@@ -248,8 +248,8 @@ impl Connection {
 
         Ok(QueryResponse {
             query_token: token,
-            length:      len,
-            response:    response,
+            length: len,
+            response: response,
         })
     }
 
