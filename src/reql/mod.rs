@@ -1,2 +1,1 @@
-mod command;
-mod tree;
+pub mod tree;

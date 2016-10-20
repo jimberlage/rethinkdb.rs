@@ -8,15 +8,7 @@ extern crate scram;
 mod macros;
 
 mod connection;
-mod db;
 mod error;
-mod query;
+mod reql;
 mod ql2;
 mod test;
-
-use db::DB;
-use error::Error;
-
-pub fn db(name: &str) -> Result<DB, Error> {
-    Ok(DB{})
-}

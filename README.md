@@ -1,37 +1,8 @@
-# RethinkDB 2.0 Rust Driver
+# rethinkdb.rs
 
-This is a very early stage WIP driver for json protocol. Compatible with Rust beta.
+This is a Rust driver for [RethinkDB](https://rethinkdb.com).  It is *not* in a stable state yet, but it's getting there.  We are targeting V1\_0 of the RethinkDB protocol.  Other versions will probably not be supported anytime soon, though I'm certainly open to having them.
 
-# Example
+## Useful Links
 
-````rust
-  use rethinkdb::RethinkDB;
-  use rethinkdb::api::*;
-
-	  let mut rethinkdb = RethinkDB::connect("localhost", 7888, "AUTH", 3);
-    let tc = db("test").table_create("person").replicas(1i32).run(&mut rethinkdb);
-
-    struct Person {
-    	name : String,
-    	age  : u32,
-    }
-    let nacho = Person{name : "nacho".to_string(), age : 6};
-
-    db("test").table("person").insert(json::encode(nacho)).run(&mut rethinkdb);
-
-
-````
-
-# Messages implemented
-   - DB
-   - TABLE_CREATE
-   - TABLE
-   - TABLE_DROP
-   - GET
-
-# Contributing
-By now it is just a PR with the project bein able to build.
-
-
-# Licence
-MIT
+- [Writing Drivers](https://rethinkdb.com/docs/writing-drivers/) describes the initial handshake and how queries should be serialized
+- [ql2.proto](https://github.com/jimberlage/rethinkdb.rs/blob/master/ql2.proto) describes the possible commands for RethinkDB
